@@ -1,0 +1,412 @@
+################################################################################
+scRNA-seq Seurat Pipeline: WT vs 5xFAD
+################################################################################
+
+# -----------------------------
+# 1) Load libraries
+# -----------------------------
+library(Seurat)
+library(dplyr)
+library(sctransform)
+library(EnhancedVolcano)
+library(harmony)
+library(ggplot2)
+library(tidyverse)
+library(patchwork)
+library(plyr) 
+library(glmGamPoi) # Required dependency for SCTransform
+library(scDblFinder)
+library(SingleCellExperiment)
+
+options(future.globals.maxSize = 10 * 1024^3) # Ensure high memory limit
+
+# -----------------------------
+# 2) Set directories and Parameters
+# -----------------------------
+base_dir <- #set home directory
+setwd(base_dir)
+
+# Create folders
+dir.create(file.path(base_dir, "rds_objects"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(base_dir, "plots"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(base_dir, "DEGs"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(base_dir, "VolcanoPlots"), recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(base_dir, "qc_data"), recursive = TRUE, showWarnings = FALSE)
+
+today_date <- format(Sys.Date(), "%Y%m%d")
+
+# -----------------------------
+# 3) Load individual samples (can adjust for h5 files)
+# -----------------------------
+untar_and_load <- function(sample_id) {
+  untar(file.path(base_dir, paste0(sample_id, "/filtered_feature_bc_matrix.tar.gz")),
+        exdir = file.path(base_dir, paste0(sample_id, "/filtered_feature_bc_matrix")))
+  obj <- CreateSeuratObject(Read10X(data.dir = file.path(base_dir, paste0(sample_id, "/filtered_feature_bc_matrix"))),
+                            project = sample_id)
+  obj <- RenameCells(obj, add.cell.id = sample_id)
+  return(obj)
+}
+
+RJE_1 <- untar_and_load("13389-RE-1")
+RJE_2 <- untar_and_load("13389-RE-2")
+RJE_3 <- untar_and_load("13389-RE-3")
+RJE_4 <- untar_and_load("13389-RE-4")
+RJE_5 <- untar_and_load("13389-RE-5")
+RJE_6 <- untar_and_load("13389-RE-6")
+
+# -----------------------------
+# 4) QC Filtering
+# -----------------------------
+for (obj in list(RJE_1, RJE_2, RJE_3, RJE_4, RJE_5, RJE_6)) {
+  obj[["percent.mt"]] <- PercentageFeatureSet(obj, pattern = "^mt-")
+}
+
+# Assign labels
+RJE_1$sample_label <- "Wildtype 1"
+RJE_2$sample_label <- "Wildtype 2"
+RJE_3$sample_label <- "Wildtype 3"
+RJE_4$sample_label <- "5XFAD 1"
+RJE_5$sample_label <- "5XFAD 2"
+RJE_6$sample_label <- "5XFAD 3"
+
+# -----------------------------
+# 4) Calculate %MT and Sequential QC Filtering 
+# -----------------------------
+
+# Detect mitochondrial gene prefix
+mt_genes <- grep("^mt-|^MT-", rownames(RJE_1), value = TRUE)[1]
+if (is.null(mt_genes) | length(mt_genes) == 0) {
+  stop("No mitochondrial genes detected. Please check gene naming convention.")
+}
+
+# Calculate %MT for each sample
+RJE_1[["percent.mt"]] <- PercentageFeatureSet(RJE_1, pattern = "^mt-|^MT-")
+RJE_2[["percent.mt"]] <- PercentageFeatureSet(RJE_2, pattern = "^mt-|^MT-")
+RJE_3[["percent.mt"]] <- PercentageFeatureSet(RJE_3, pattern = "^mt-|^MT-")
+RJE_4[["percent.mt"]] <- PercentageFeatureSet(RJE_4, pattern = "^mt-|^MT-")
+RJE_5[["percent.mt"]] <- PercentageFeatureSet(RJE_5, pattern = "^mt-|^MT-")
+RJE_6[["percent.mt"]] <- PercentageFeatureSet(RJE_6, pattern = "^mt-|^MT-")
+
+# Apply QC cutoffs
+RJE_1 <- subset(RJE_1, subset = nFeature_RNA > 1000 & nFeature_RNA < 7000 &
+                  nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 20)
+RJE_2 <- subset(RJE_2, subset = nFeature_RNA > 1000 & nFeature_RNA < 7000 &
+                  nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 20)
+RJE_3 <- subset(RJE_3, subset = nFeature_RNA > 1000 & nFeature_RNA < 7000 &
+                  nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 20)
+RJE_4 <- subset(RJE_4, subset = nFeature_RNA > 1000 & nFeature_RNA < 7000 &
+                  nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 20)
+RJE_5 <- subset(RJE_5, subset = nFeature_RNA > 1000 & nFeature_RNA < 7000 &
+                  nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 20)
+RJE_6 <- subset(RJE_6, subset = nFeature_RNA > 1000 & nFeature_RNA < 7000 &
+                  nCount_RNA > 1000 & nCount_RNA < 30000 & percent.mt < 20)
+
+
+# -----------------------------
+# 5) Doublet detection & removal using scDblFinder
+# -----------------------------
+run_doublet_removal <- function(obj) {
+  DefaultAssay(obj) <- "RNA"
+  sce <- as.SingleCellExperiment(obj)
+  set.seed(1234)
+  sce <- scDblFinder(sce)
+  singlet_cells <- colnames(obj)[sce$scDblFinder.class == "singlet"]
+  obj_singlet <- subset(obj, cells = singlet_cells)
+  return(obj_singlet)
+}
+
+RJE_1 <- run_doublet_removal(RJE_1)
+RJE_2 <- run_doublet_removal(RJE_2)
+RJE_3 <- run_doublet_removal(RJE_3)
+RJE_4 <- run_doublet_removal(RJE_4)
+RJE_5 <- run_doublet_removal(RJE_5)
+RJE_6 <- run_doublet_removal(RJE_6)
+
+
+
+# -----------------------------
+# Print number of cells after QC filtering
+# -----------------------------
+qc_counts <- sapply(list(RJE_1, RJE_2, RJE_3, RJE_4, RJE_5, RJE_6), ncol)
+names(qc_counts) <- c("RJE_1", "RJE_2", "RJE_3", "RJE_4", "RJE_5", "RJE_6")
+
+cat("\nNumber of cells remaining after QC filtering:\n")
+print(qc_counts)
+
+# -----------------------------
+# 6) SCTransform (Individual)
+# -----------------------------
+RJE_1 <- SCTransform(RJE_1, variable.features.n = 800)
+RJE_2 <- SCTransform(RJE_2, variable.features.n = 800)
+RJE_3 <- SCTransform(RJE_3, variable.features.n = 800)
+RJE_4 <- SCTransform(RJE_4, variable.features.n = 800)
+RJE_5 <- SCTransform(RJE_5, variable.features.n = 800)
+RJE_6 <- SCTransform(RJE_6, variable.features.n = 800)
+
+# -----------------------------
+# 7) Assign conditions & Merge datasets
+# -----------------------------
+RJE_1$condition <- "WT";     RJE_1$sample <- "WT 1"
+RJE_2$condition <- "WT";     RJE_2$sample <- "WT 2"
+RJE_3$condition <- "WT";     RJE_3$sample <- "WT 3"
+RJE_4$condition <- "5xFAD";  RJE_4$sample <- "5XFAD 1"
+RJE_5$condition <- "5xFAD";  RJE_5$sample <- "5XFAD 2"
+RJE_6$condition <- "5xFAD";  RJE_6$sample <- "5XFAD 3"
+
+merge <- merge(RJE_1, y = list(RJE_2, RJE_3, RJE_4, RJE_5, RJE_6),
+               add.cell.ids = c("RJE_1", "RJE_2", "RJE_3", "RJE_4", "RJE_5", "RJE_6"))
+
+merge[["RNA"]] <- JoinLayers(merge[["RNA"]])
+DefaultAssay(merge) <- "SCT"
+
+# -----------------------------
+# 8) Dimensionality Reduction & Batch Correction
+# -----------------------------
+n_dims <- 30 # Number of PCs/Harmony dimensions to use for clustering
+features <- SelectIntegrationFeatures(object.list = list(RJE_1, RJE_2, RJE_3, RJE_4, RJE_5, RJE_6), nfeatures = 3000)
+merge <- RunPCA(merge, features = features, npcs = 30, verbose = FALSE)
+merge <- RunHarmony(merge, group.by.vars = "sample", dims = 1:30)
+
+# -----------------------------
+# 9) Clustering & UMAP
+# -----------------------------
+merge <- FindNeighbors(merge, reduction = "harmony", dims = 1:13)
+merge <- FindClusters(merge, resolution = 0.25)
+merge <- RunUMAP(merge, reduction = "harmony", dims = 1:13,
+                 reduction.name = "umap_harmony", n.neighbors = 30, min.dist = 0.3)
+
+DimPlot(merge, reduction = "umap_harmony", group.by = "seurat_clusters", label = TRUE)
+
+# -----------------------------
+# 10) Marker Discovery
+# -----------------------------
+DefaultAssay(merge) <- "SCT"
+merge <- PrepSCTFindMarkers(merge, assay = "SCT")
+
+merge.markers <- FindAllMarkers(merge, assay = "SCT", only.pos = TRUE,
+                                min.pct = 0.1, logfc.threshold = 0.1)
+
+# Select top 10 markers per cluster with avg_log2FC > 1
+top10 <- merge.markers %>%
+  group_by(cluster) %>%
+  filter(avg_log2FC > 1) %>%
+  slice_head(n = 10)
+
+# Create the heatmap plot object with default colors
+heatmap_plot <- DoHeatmap(merge, features = top10$gene, assay = "SCT") + 
+  NoLegend()
+
+# Save heatmap with today's date
+tiff(file.path(base_dir, "plots", paste0(today_date, "_5XFAD_WT_ClusterID_Heatmap.tiff")),
+     width = 10000, height = 7000, res = 600)
+print(heatmap_plot)
+dev.off()
+
+
+# -----------------------------
+# 11) Save Objects
+# -----------------------------
+saveRDS(merge, file.path(base_dir, "rds_objects", paste0(today_date, "_Merged_Final.rds")))
+write.csv(merge.markers, file.path(base_dir, "DEGs", paste0(today_date, "_AllMarkers.csv")))
+
+
+#------------------------------
+# 12) Feature Plots
+#------------------------------
+################################################################################
+# Feature plots for EC regional markers
+p1 <- FeaturePlot(merge, features = "Pecam1")
+p2 <- FeaturePlot(merge, features = "Cldn5")
+p3 <- FeaturePlot(merge, features = "Cdh5")
+p4 <- FeaturePlot(merge, features = "Slc2a1")
+p5 <- FeaturePlot(merge, features = "Plvap")
+p6 <- FeaturePlot(merge, features = "Bmx")
+p7 <- FeaturePlot(merge, features = "Sema3g")
+p8 <- FeaturePlot(merge, features = "Efnb2")
+p9 <- FeaturePlot(merge, features = "Gkn3")
+p10 <- FeaturePlot(merge, features = "Gja4")
+p11 <- FeaturePlot(merge, features = "Mfsd2a")
+p12 <- FeaturePlot(merge, features = "Cxcl12")
+p13 <- FeaturePlot(merge, features = "Car4")
+p14 <- FeaturePlot(merge, features = "Vwf")
+p15 <- FeaturePlot(merge, features = "Vcam1")
+p16 <- FeaturePlot(merge, features = "Gm5127")
+p17 <- FeaturePlot(merge, features = "Nr2f2")
+p18 <- FeaturePlot(merge, features = "Slc38a5")
+p19 <- FeaturePlot(merge, features = "Tmsb10")
+p20 <- FeaturePlot(merge, features = "Ctsc")
+
+# Combine feature plots into a grid and save
+(p1|p2|p3|p4|p5)/(p6|p7|p8|p9|p10)/(p11|p12|p13|p14|p15)/(p16|p17|p18|p19|p20)
+
+tiff(file.path(base_dir, "plots", "file_name.tiff"),
+     width = 13000, height = 9000, res = 600, pointsize = 0.1)
+par(mar = c(5, 5, 4, 2) + 0.1)
+par(cex.axis = 0.5, cex.lab = 0.5, cex.main = 1, cex.sub = 0.5, tck = -0.2, las = 1)
+(p1|p2|p3|p4|p5)/(p6|p7|p8|p9|p10)/(p11|p12|p13|p14|p15)/(p16|p17|p18|p19|p20)
+dev.off()
+
+# Get today's date
+today_date <- format(Sys.Date(), "%Y%m%d")
+
+# Combine all plots (same layout as before)
+combined_plot <- (p1 | p2 | p3 | p4 | p5) /
+  (p6 | p7 | p8 | p9 | p10) /
+  (p11 | p12 | p13 | p14 | p15) /
+  (p16 | p17 | p18 | p19 | p20)
+
+# Save as PDF (similar dimensions to your TIFF)
+pdf(
+  file = file.path(base_dir, "plots", paste0(today_date, "file_name.pdf")),
+  width = 22, height = 15  # roughly equivalent to 13000x9000 pixels at 600 dpi
+)
+print(combined_plot)
+dev.off()
+
+
+# Feature plots for additional markers confirming other cell types
+p1 <- FeaturePlot(merge, features = "Egfl7")
+p2 <- FeaturePlot(merge, features = "Acta2")
+p3 <- FeaturePlot(merge, features = "Tagln")
+p4 <- FeaturePlot(merge, features = "Pdgfrb")
+p5 <- FeaturePlot(merge, features = "Kdr")
+p6 <- FeaturePlot(merge, features = "Rgs5")
+p7 <- FeaturePlot(merge, features = "Aldh1l1")
+p8 <- FeaturePlot(merge, features = "Gfap")
+
+(p1|p2|p3|p4)/(p5|p6|p7|p8)
+
+tiff(file.path(base_dir, "plots", "file_name.tiff"),
+     width = 12000, height = 6000, res = 600, pointsize = 0.1)
+par(mar = c(5, 5, 4, 2) + 0.1)
+par(cex.axis = 0.5, cex.lab = 0.5, cex.main = 1, cex.sub = 0.5, tck = -0.2, las = 1)
+(p1|p2|p3|p4)/(p5|p6|p7|p8)
+dev.off()
+
+
+# -----------------------------
+# 13) Rename clusters with your custom names
+# -----------------------------
+new_cluster_names <- c(
+  "vCap BECs",            # cluster 0
+  "aCap BECs",            # cluster 1
+  "vBECs",                # cluster 2
+  "mBECs",                # cluster 3
+  "iBECs",                # cluster 4
+  "aBECs",                # cluster 5
+  "Non-barrier BECs",     # cluster 6
+  "Astrocytes",           # cluster 7
+  "Pericytes"             # cluster 8
+)
+names(new_cluster_names) <- levels(merge)
+merge <- RenameIdents(merge, new_cluster_names)
+
+# -----------------------------
+# 14) Define cluster colors (for the identity bar at top)
+# -----------------------------
+cluster_colors <- c(
+  "aCap BECs" = "#F4A6C0",
+  "vCap BECs" = "#9F9EFF",
+  "mBECs" = "#FDB863",
+  "iBECs" = "#41AB5D",
+  "aBECs" = "#D7191C",
+  "vBECs" = "#547ACC",
+  "Non-barrier BECs" = "#DDCC77",
+  "Astrocytes" = "#984EA3",
+  "Pericytes" = "#A6761D"
+)
+used_colors <- cluster_colors[names(cluster_colors) %in% levels(merge)]
+
+# -----------------------------
+# 15) Select top 10 markers per cluster
+# -----------------------------
+top10 <- merge.markers %>%
+  group_by(cluster) %>%
+  filter(avg_log2FC > 1) %>%
+  slice_head(n = 10)
+
+# -----------------------------
+# 16) Create heatmap
+# -----------------------------
+
+heatmap_plot <- DoHeatmap(
+  merge,
+  features = top10$gene,
+  assay = "SCT",
+  group.colors = used_colors,
+  label = TRUE
+) +
+  scale_fill_gradient2(
+    low = "#4169E1",
+    mid = "#222222",
+    high = "#FFFF66",
+    midpoint = 0,
+    name = "Expression"
+  ) +
+  guides(color = "none") +
+  theme(
+    # Gene Labels on the Left (Keep these visible and set to your original size)
+    axis.text.y = element_text(size = 18), 
+    
+    # Gene Labels on the Bottom (Hide these)
+    axis.text.x = element_blank(),
+    
+    # THIS IS THE KEY: Target the facet/strip text, which controls the CLUSTER NAMES on top
+    strip.text.x = element_text(size = 30), # <--- USE STRIP.TEXT.X
+    
+    axis.ticks.x = element_blank(),
+    legend.key.height = unit(2, "cm"),
+    legend.key.width = unit(2, "cm"),
+    legend.text = element_text(size = 30),
+    legend.title = element_text(size = 35)
+  )
+
+# Save heatmap
+tiff(file.path(base_dir, "plots", paste0(today_date, "file_name.tiff")),
+     width = 18000, height = 14000, res = 600)
+
+print(heatmap_plot)
+dev.off()
+
+
+# -----------------------------
+# 17) UMAP with custom cluster colors
+# -----------------------------
+
+# Get today's date automatically
+today_date <- format(Sys.Date(), "%Y%m%d")
+
+# Create UMAP plot
+umap_plot <- DimPlot(
+  merge,
+  reduction = "umap_harmony",
+  label = FALSE,        # no cluster labels on the UMAP
+  pt.size = 0.5,
+  cols = used_colors
+) +
+  ggtitle("UMAP of 5XFAD vs WT") +
+  theme_classic() +      # keeps axes but removes background grid
+  theme(
+    legend.position = "right",
+    legend.text = element_text(size = 28),
+    legend.title = element_blank(),
+    panel.grid = element_blank(),       # no gridlines
+    axis.line = element_line(size = 0.8),
+    axis.ticks = element_line(size = 0.8),
+    axis.text = element_text(size = 16),
+    axis.title = element_text(size = 20),
+    plot.title = element_text(size = 30, hjust = 0.5),
+    aspect.ratio = 1                    # make the plot square
+  )
+
+# Save as PDF with today's date in the filename
+pdf(
+  file = file.path(base_dir, "plots", paste0(today_date, "file_name.pdf")),
+  width = 14, height = 14  # square dimensions
+)
+print(umap_plot)
+dev.off()
+
+
+
+

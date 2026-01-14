@@ -1,0 +1,63 @@
+#following QC and merged Seurat Object
+library(Seurat)
+library(nebula)
+library(dplyr)
+library(Matrix)
+
+DefaultAssay(merge) <- "RNA"
+merge$condition <- factor(merge$condition, levels = c("WT", "5xFAD"))
+table(merge$sample)
+clusters_to_use <- 0:5
+obj_sub <- subset(merge, seurat_clusters %in% clusters_to_use)
+Idents(obj_sub) <- obj_sub$seurat_clusters
+obj_sub$sample <- as.factor(obj_sub$sample)
+obj_sub$condition <- as.factor(obj_sub$condition)
+obj_sub$condition <- relevel(obj_sub$condition, ref = "WT")
+pred <- data.frame(condition = obj_sub$condition)
+run_nebula_cluster <- function(seu_obj, cluster_id) {
+  cat("Running nebula for cluster:", cluster_id, "\n")
+  cells <- WhichCells(seu_obj, idents = cluster_id)
+  obj_cl <- subset(seu_obj, cells = cells)
+  counts <- GetAssayData(obj_cl, slot = "counts")
+  meta <- obj_cl@meta.data
+  meta$sample <- as.factor(meta$sample)
+  meta$condition <- relevel(factor(meta$condition), ref = "WT")
+  keep <- Matrix::rowSums(counts > 0) >= 10
+  counts <- counts[keep, , drop = FALSE]
+  # Predictor matrix with intercept
+  pred_df <- data.frame(intercept = 1, condition = as.numeric(meta$condition == "5xFAD"))
+  
+  # Run nebula
+  res <- nebula(
+    count = counts,
+    id = meta$sample,
+    pred = pred_df,
+    method = "LN"
+  )
+  sum_df <- as.data.frame(res$summary)
+  out <- data.frame(
+    gene = sum_df$gene,
+    cluster = cluster_id,
+    logFC = sum_df$logFC_condition,
+    coef = sum_df$logFC_condition,
+    pval = sum_df$p_condition
+  )
+  
+  # Adjust p-values
+  out$padj <- p.adjust(out$pval, method = "BH")
+  
+  return(out)
+}
+results_list <- list()
+
+for (cl in clusters_to_use) {
+  cl_res <- run_nebula_cluster(obj_sub, cl)
+  results_list[[as.character(cl)]] <- cl_res
+}
+final_results <- bind_rows(results_list)
+
+write.csv(final_results,
+          file = file.path(base_dir, "nebula_mixed_effect_DEGs_clusters0to5.csv"),
+          row.names = FALSE)
+
+cat("nebula finished successfully\n")

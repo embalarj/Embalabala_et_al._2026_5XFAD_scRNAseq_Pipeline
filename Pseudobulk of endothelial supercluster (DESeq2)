@@ -1,0 +1,58 @@
+#Following QC and merged seurat object pipeline
+library(Seurat)
+library(dplyr)
+library(Matrix)
+library(DESeq2)
+
+# -----------------------------
+# Step 0: Subset clusters 0-5
+# -----------------------------
+clusters_to_use <- 0:5
+obj_sub <- subset(merge, seurat_clusters %in% clusters_to_use)
+
+# -----------------------------
+# Step 1: Aggregate counts per sample (merge clusters)
+# -----------------------------
+counts <- GetAssayData(obj_sub, slot = "counts")  # genes x cells
+meta <- obj_sub@meta.data
+meta <- meta[colnames(counts), ]
+
+# Create pseudobulk counts: sum across cells per sample (all clusters together)
+meta$sample_only <- meta$sample
+pseudobulk_counts <- tapply(
+  1:ncol(counts),
+  meta$sample_only,
+  function(idx) rowSums(counts[, idx])
+)
+pseudobulk_counts <- do.call(cbind, pseudobulk_counts)
+
+# Build sample metadata
+sample_info <- data.frame(
+  sample = colnames(pseudobulk_counts),
+  condition = meta$condition[match(colnames(pseudobulk_counts), meta$sample)],
+  stringsAsFactors = FALSE
+)
+rownames(sample_info) <- colnames(pseudobulk_counts)
+
+# -----------------------------
+# Step 2: DESeq2 analysis
+# -----------------------------
+keep <- rowSums(pseudobulk_counts) > 0
+counts_keep <- pseudobulk_counts[keep, ]
+
+dds <- DESeqDataSetFromMatrix(
+  countData = counts_keep,
+  colData = sample_info,
+  design = ~ condition
+)
+
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("condition", "5xFAD", "WT"))
+res_df <- as.data.frame(res)
+res_df$gene <- rownames(res_df)
+
+# -----------------------------
+# Step 3: Write results to CSV
+# -----------------------------
+output_file <- file.path(base_dir, "DESeq2_Pseudobulk_Clusters0_5_Merged.csv")
+write.csv(res_df, file = output_file, row.names = FALSE)
